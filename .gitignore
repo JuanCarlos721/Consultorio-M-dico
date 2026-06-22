@@ -1,0 +1,12 @@
+build/Debug/*.exe
+*.exe
+build/Debug/mainsemana2.cpp
+build/Debug/mainsemana2.exe
+pacientes.txt
+usuarios.txt
+medicos.txt
+recepcionistas.txt
+build/Debug/pacientes.txt
+build/Debug/usuarios.txt
+build/Debug/medicos.txt
+build/Debug/recepcionistas.txt
