@@ -1,3 +1,5 @@
+node_modules/
+.env
 build/Debug/*.exe
 *.exe
 build/Debug/mainsemana2.cpp
