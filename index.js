@@ -1,17 +1,37 @@
 // ============================================================================
 // CONFIGURACION DE MODULOS Y DEPENDENCIAS (Por: Juan Jose Corrales)
 // ============================================================================
+// Carga las variables de entorno definidas en el archivo .env (host, usuario,
+// contrasena y nombre de la base de datos), para no dejar credenciales
+// escritas directamente en el codigo.
 require('dotenv').config();
+
+// Driver de MySQL con soporte de Promesas, permite usar async/await en lugar
+// de callbacks para todas las consultas a la base de datos.
 const mysql = require('mysql2/promise');
+
+// Modulo nativo de Node para leer entradas del usuario desde la consola
+// (terminal), tambien con soporte de Promesas.
 const readline = require('readline/promises');
+
+// Modulo nativo de Node para funciones criptograficas, usado aqui para
+// generar el hash SHA-256 de las contrasenas.
 const crypto = require('crypto');
 
+// Interfaz de lectura/escritura en consola: input toma el teclado y output
+// imprime en la terminal.
 const rl = readline.createInterface({
     input: process.stdin,
     output: process.stdout
 });
 
+// Variable global que guarda la conexion activa a MySQL para reutilizarla
+// en todas las funciones del programa.
 let connection;
+
+// Variable global que guarda los datos del usuario que inicio sesion
+// (objeto "persona"); se usa para saber el rol y filtrar la informacion
+// que le corresponde ver.
 let usuarioActivo = null;
 
 // ============================================================================
@@ -41,8 +61,14 @@ function validarId(id) {
 // ============================================================================
 // CONEXION E INICIALIZACION DE BASE DE DATOS (Por: Juan Jose Corrales)
 // ============================================================================
+
+// Establece la conexion con MySQL usando las variables de entorno (o valores
+// por defecto si no existen) y prepara el sistema para empezar a funcionar.
 async function inicializarBD() {
     try {
+        // Se crea la conexion a la base de datos con los datos de .env;
+        // si alguna variable no esta definida, se usa un valor por defecto
+        // (utiles para pruebas locales con XAMPP/WAMP).
         connection = await mysql.createConnection({
             host: process.env.DB_HOST || 'localhost',
             user: process.env.DB_USER || 'root',
@@ -54,8 +80,12 @@ async function inicializarBD() {
         console.log("[SISTEMA] Conectado exitosamente a la base de datos MySQL.");
 
         // Crear administrador por defecto si no existe ninguno
+        // Se busca si ya existe algun usuario con rol "Administrador" o "admin".
+        // Esto evita quedarse sin acceso al sistema en una instalacion nueva.
         const [rows] = await connection.query("SELECT * FROM persona WHERE rol = 'Administrador' OR rol = 'admin'");
         if (rows.length === 0) {
+            // Si no hay ningun administrador, se crea uno con credenciales
+            // predefinidas (ADM001 / admin123) para poder entrar la primera vez.
             await connection.query(
                 "INSERT INTO persona (ine, nombre, fecha_nacimiento, correo, contrasenia, rol) VALUES (?, ?, ?, ?, ?, ?)",
                 ["ADM001", "Administrador del Sistema", "1990-01-01", "admin@hospital.com", "admin123", "Administrador"]
@@ -63,6 +93,9 @@ async function inicializarBD() {
             console.log("[SISTEMA] Administrador por defecto creado (Usuario: ADM001 o admin@hospital.com, Clave: admin123).");
         }
     } catch (error) {
+        // Si falla la conexion (por ejemplo, el servidor MySQL no esta
+        // encendido o la BD no existe), se informa el error y se cierra
+        // el programa, ya que sin BD el sistema no puede funcionar.
         console.error("[ERROR] No se pudo conectar a la base de datos MySQL:", error.message);
         console.log("Por favor, asegurese de tener el servidor local activo (XAMPP/WAMP) y haber creado la base de datos.");
         process.exit(1);
@@ -249,9 +282,16 @@ async function menuPaciente() {
 // TRANSACCIONES Y OPERACIONES EN BASE DE DATOS (Por: Juan Jose Corrales)
 // ============================================================================
 
+// Pide los datos comunes a cualquier persona (INE, nombre, fecha de
+// nacimiento, correo y contrasena) y devuelve un objeto listo para
+// insertarse en la tabla "persona". El parametro "rol" indica el tipo
+// de usuario que se esta registrando (Medico, Paciente, etc.).
 async function capturarDatosPersona(rol) {
     console.log(`\n--- Registro de ${rol} ---`);
     let ine = "";
+
+    // Ciclo que se repite hasta que el INE ingresado sea valido y no
+    // este duplicado en la base de datos.
     while (true) {
         ine = (await rl.question("INE / ID (max 10 caracteres): ")).trim();
         const valid = validarId(ine);
@@ -272,40 +312,57 @@ async function capturarDatosPersona(rol) {
     const fecha_nacimiento = (await rl.question("Fecha de nacimiento (AAAA-MM-DD): ")).trim();
     const correo = (await rl.question("Correo electronico: ")).trim();
     const contraseniaPlana = (await rl.question("Contrasena: ")).trim();
+    // La contrasena se guarda ya "hasheada", nunca en texto plano.
     const contraseniaHash = generarHash(contraseniaPlana);
 
     return { ine, nombre, fecha_nacimiento, correo, contrasenia: contraseniaHash, rol };
 }
-
+// Registra una nueva Recepcionista: primero captura los datos generales de
+// persona y luego los datos especificos de recepcionista (turno y
+// escritorio), guardando todo en una sola transaccion.
 async function registrarRecepcionista() {
+    // Se obtiene una conexion individual del pool para poder manejar la
+    // transaccion de forma aislada (begin/commit/rollback).
     const conn = await connection.getConnection();
     try {
         const datos = await capturarDatosPersona("Recepcionista");
         const turno = (await rl.question("Turno (Matutino/Vespertino/Nocturno): ")).trim();
         const escritorio = (await rl.question("Escritorio/Modulo asignado: ")).trim();
 
+        // Se inicia la transaccion: si algo falla mas adelante, ninguno
+        // de los dos INSERT quedara guardado (evita registros a medias).
         await conn.beginTransaction();
-        
+
+        // Primero se inserta en la tabla general "persona"...
         await conn.query(
             "INSERT INTO persona (ine, nombre, fecha_nacimiento, correo, contrasenia, rol) VALUES (?, ?, ?, ?, ?, ?)",
             [datos.ine, datos.nombre, datos.fecha_nacimiento, datos.correo, datos.contrasenia, datos.rol]
         );
 
+        // ...y luego en la tabla especifica "recepcionista", enlazada por INE.
         await conn.query(
             "INSERT INTO recepcionista (ine, turno, escritorio_asignado) VALUES (?, ?, ?)",
             [datos.ine, turno, escritorio]
         );
 
+        // Si ambos INSERT salieron bien, se confirman los cambios de forma
+        // permanente en la base de datos.
         await conn.commit();
         console.log("\n[EXITO] Recepcionista registrado y persistido en MySQL.");
     } catch (error) {
+        // Si algo fallo, se revierte todo lo que se haya intentado
+        // insertar dentro de esta transaccion.
         await conn.rollback();
         console.error("\n[ERROR] No se pudo registrar a la recepcionista:", error.message);
     } finally {
+        // La conexion se libera siempre, haya habido error o no, para
+        // que vuelva a estar disponible en el pool.
         conn.release();
     }
 }
 
+// Registra un nuevo Medico: misma logica que la recepcionista, pero
+// guardando especialidad y numero de colegiado en la tabla "medico".
 async function registrarMedico() {
     const conn = await connection.getConnection();
     try {
@@ -335,16 +392,23 @@ async function registrarMedico() {
     }
 }
 
+// Registra un nuevo Paciente: ademas de los datos generales, le pide
+// elegir un medico de cabecera de la lista de medicos existentes y le
+// crea automaticamente un historial clinico inicial vacio.
 async function registrarPaciente() {
     const conn = await connection.getConnection();
     try {
         const datos = await capturarDatosPersona("Paciente");
 
         // Mostrar medicos disponibles
+        // Se obtiene la lista de medicos (uniendo "medico" con "persona"
+        // para tener tambien su nombre) para que el usuario elija uno
+        // como medico de cabecera del paciente.
         const [medicos] = await conn.query(
             "SELECT m.ine, p.nombre, m.especialidad FROM medico m JOIN persona p ON m.ine = p.ine"
         );
-        
+        // Si no hay ningun medico registrado, no se puede continuar,
+        // ya que todo paciente necesita un medico de cabecera.
         if (medicos.length === 0) {
             console.log("\n[ERROR] No hay medicos registrados en el sistema para asociar al paciente.");
             return;
@@ -355,6 +419,8 @@ async function registrarPaciente() {
             console.log(`${i + 1}. ${m.nombre} (${m.especialidad}) [INE: ${m.ine}]`);
         });
 
+        // Se valida que el numero elegido corresponda a una opcion real
+        // de la lista mostrada (evita indices fuera de rango).
         let index;
         while (true) {
             const op = await rl.question("Seleccione el numero del medico de cabecera: ");
@@ -369,23 +435,28 @@ async function registrarPaciente() {
 
         await conn.beginTransaction();
 
+        // 1) Se inserta el paciente en la tabla general "persona".
         await conn.query(
             "INSERT INTO persona (ine, nombre, fecha_nacimiento, correo, contrasenia, rol) VALUES (?, ?, ?, ?, ?, ?)",
             [datos.ine, datos.nombre, datos.fecha_nacimiento, datos.correo, datos.contrasenia, datos.rol]
         );
-
+        // 2) Se inserta en la tabla "paciente", enlazandolo con su
+        // medico de cabecera elegido.
         await conn.query(
             "INSERT INTO paciente (ine, ine_medico_cabecera) VALUES (?, ?)",
             [datos.ine, ine_medico_cabecera]
         );
 
         // Crear historial clinico vacio inicial
+        // 3) Se crea automaticamente un registro inicial en el historial
+        // clinico del paciente, con la fecha de hoy.
         const hoy = new Date().toISOString().slice(0, 10);
         await conn.query(
             "INSERT INTO historialclinico (ine_paciente, fecha_apertura, observaciones_generales) VALUES (?, ?, ?)",
             [datos.ine, hoy, "Historial abierto el dia del registro."]
         );
-
+        // Las tres inserciones (persona, paciente, historial) se
+        // confirman juntas; si alguna falla, ninguna se guarda.
         await conn.commit();
         console.log("\n[EXITO] Paciente e Historial Clinico inicial registrados y persistidos en MySQL.");
     } catch (error) {
@@ -396,6 +467,9 @@ async function registrarPaciente() {
     }
 }
 
+// Muestra en consola la lista completa de usuarios del sistema
+// (cualquier rol), ordenados por rol y luego por nombre. Solo deberia
+// ser accesible para el Administrador.
 async function verUsuarios() {
     try {
         const [rows] = await connection.query(
@@ -411,6 +485,8 @@ async function verUsuarios() {
     }
 }
 
+// Muestra la lista de pacientes junto con su medico de cabecera y la
+// especialidad de ese medico (combina tablas paciente, persona y medico).
 async function verPacientes() {
     try {
         const [rows] = await connection.query(
@@ -437,6 +513,9 @@ async function verPacientes() {
     }
 }
 
+// Permite agendar una cita medica entre un paciente y un medico existentes,
+// validando que ambos existan y que no haya otra cita del mismo medico
+// programada exactamente a esa misma fecha y hora.
 async function programarCita() {
     try {
         console.log("\n--- Programar Cita Medica ---");
@@ -458,10 +537,14 @@ async function programarCita() {
         }
 
         const fecha = (await rl.question("Fecha (AAAA-MM-DD): ")).trim();
+        // Se le agrega ":00" a la hora ingresada (HH:MM) para que quede
+        // en formato HH:MM:SS, compatible con el tipo TIME de MySQL.
         const hora = (await rl.question("Hora (HH:MM): ")).trim() + ":00";
         const detalles = (await rl.question("Detalles / Motivo de consulta: ")).trim();
 
         // Validar que no existan duplicados / empalmes de horario
+        // Se revisa si el mismo medico ya tiene una cita exactamente en
+        // esa fecha y hora, para evitar que se le encimen dos pacientes.
         const [conflicto] = await connection.query(
             "SELECT id_cita FROM cita WHERE ine_medico = ? AND fecha = ? AND hora = ?",
             [ine_medico, fecha, hora]
@@ -471,7 +554,7 @@ async function programarCita() {
             console.log("\n[ERROR CLINICA] Conflicto de horario. El medico ya tiene una cita programada a esa hora.");
             return;
         }
-
+        // Si no hay conflicto, se guarda la nueva cita.
         await connection.query(
             "INSERT INTO cita (fecha, hora, detalles_consulta, ine_paciente, ine_medico) VALUES (?, ?, ?, ?, ?)",
             [fecha, hora, detalles, ine_paciente, ine_medico]
@@ -483,6 +566,9 @@ async function programarCita() {
     }
 }
 
+// Muestra las citas agendadas del medico que tiene la sesion iniciada
+// (usuarioActivo), ordenadas por fecha y hora, junto con el nombre del
+// paciente correspondiente a cada cita.
 async function verAgendaMedico() {
     try {
         const [citas] = await connection.query(
@@ -508,6 +594,8 @@ async function verAgendaMedico() {
     }
 }
 
+// Muestra los datos personales del paciente que tiene la sesion iniciada,
+// incluyendo el nombre y especialidad de su medico de cabecera.
 async function verDatosPaciente() {
     try {
         const [pac] = await connection.query(
@@ -531,11 +619,16 @@ async function verDatosPaciente() {
             console.log(`Medico de Cabecera: ${p.medico_nombre} (${p.especialidad})`);
             console.log("----------------------------");
         }
+        // Nota: si "pac.length" fuera 0 (el paciente no se encuentra en
+        // la BD), aqui no se muestra ningun mensaje de error; podria
+        // agregarse un "else" con un aviso para el usuario.
     } catch (error) {
         console.error("\n[ERROR] No se pudieron obtener tus datos:", error.message);
     }
 }
 
+// Muestra las citas medicas del paciente que tiene la sesion iniciada,
+// ordenadas por fecha y hora, junto con el nombre del medico de cada cita.
 async function verCitasPaciente() {
     try {
         const [citas] = await connection.query(
