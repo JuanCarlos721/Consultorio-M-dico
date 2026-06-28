@@ -106,41 +106,59 @@ async function inicializarBD() {
 // AUTENTICACION Y CONTROL DE ACCESO (Por: Juan Carlos Perez)
 // ============================================================================
 async function iniciarSesion() {
+// Funcion para el inicio de sesion. Asincrona para la lectura de la DB
+//  en simultaneo sin detener la ejecucion de index.js
     console.log("\n=========================================");
     console.log("           INICIO DE SESION");
     console.log("=========================================");
+
+    // constantes para la solicitud de datos. Espera a que el usuario introduzca los datos
+    // Los espacios sobrantes son eliminados para evitar errores de dedo
     const identifier = (await rl.question("Usuario (INE o Correo): ")).trim();
     const password = (await rl.question("Contrasena: ")).trim();
 
+    // Verificar que los 2 campos no esten vacios
     if (!identifier || !password) {
         console.log("\n[ERROR] El usuario y la contrasena son obligatorios.");
         return false;
     }
 
+    // Consulta a la DB para buscar el usuario con las credenciales que coinciden con las ingresadas
+    // los signos '?' son marcadores de posicion que se remplazan de forma segura por los valores del arreglo,
+    // esto para evitar ataques de inyeccion SQL en el inicio de sesion.
     try {
         const [rows] = await connection.query(
             "SELECT * FROM persona WHERE ine = ? OR correo = ?",
             [identifier, identifier]
         );
 
+        // Si el arreglo de resultados esta vacio, ningun usuario coincide con los datos ingresados
         if (rows.length === 0) {
             console.log("\n[ERROR] Usuario no encontrado.");
             return false;
         }
 
+        // Obtener el registro encontrado
         const user = rows[0];
+        // Cifrar la contrase;a
         const hashedInput = generarHash(password);
 
-        // Compatible con contrasenas del dump en plano y contrasenas nuevas en hash
+        // Comprobacion de credenciales. 
+        // 1. Se valida en texto plano en caso de que sea un registro antiguo (previo a la implementacion del cifrado hash)
+        // 2. Se valida la contraseña cifrada
         if (user.contrasenia === password || user.contrasenia === hashedInput) {
+            // Guardar informacion del usuario durante la sesion
             usuarioActivo = user;
-            console.log(`\n[ACCESO] Bienvenido al sistema, ${user.nombre} (${user.rol})!`);
-            return true;
+            console.log(`\n[ACCESO] Bienvenido al sistema, ${user.nombre} (${user.rol})!`); // Mostrar datos y rol del usuario
+            // inicio de sesion correcto
+            return true; 
         } else {
             console.log("\n[ERROR] Contrasena incorrecta.");
+            // inicio de sesion incorecto (ninguna de las validaciones es exitosa)
             return false;
         }
     } catch (error) {
+        // captura errores en la consulta con MySQL o errores de sintaxis y se muestra en consola
         console.error("\n[ERROR] Fallo al validar credenciales:", error.message);
         return false;
     }
